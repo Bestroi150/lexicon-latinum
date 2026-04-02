@@ -34,6 +34,7 @@ POS_MAP: dict[str, str] = {
     "adv.": "Adverb",
     "n.": "Noun",
     "adj.": "Adjective",
+    "adi.": "Adjective",
     "prep.": "Preposition",
     "conj.": "Conjunction",
     "pron.": "Pronoun",
@@ -314,19 +315,45 @@ def _parse_entry(entry_el, source_file: str) -> dict:
             if val:
                 inflected.append(val)
 
-    # Grammar group
-    gg = entry_el.find("tei:gramGrp", NS)
-    pos = gender = itype = ""
-    if gg is not None:
+    # Grammar group — collect from ALL gramGrp children of entry (not just the
+    # first), and also from gramGrp nested inside <form type="lemma">, because
+    # some entries (e.g. atrōx) place gender tags there and pos in a later block.
+    pos = itype = ""
+    genders: list[str] = []
+    case_label = ""
+
+    # gramGrp inside the lemma form
+    lemma_form_el = entry_el.find("tei:form[@type='lemma']", NS)
+    if lemma_form_el is not None:
+        inner_gg = lemma_form_el.find("tei:gramGrp", NS)
+        if inner_gg is not None:
+            for gram in inner_gg.findall("tei:gram", NS):
+                gtype = gram.get("type", "")
+                val = _text(gram)
+                if gtype == "gender" and val:
+                    genders.append(val)
+                elif gtype == "pos" and val:
+                    pos = val
+                elif gtype == "iType" and val:
+                    itype = val
+
+    # all gramGrp direct children of entry
+    for gg in entry_el.findall("tei:gramGrp", NS):
         for gram in gg.findall("tei:gram", NS):
             gtype = gram.get("type", "")
             val = _text(gram)
-            if gtype == "pos":
+            if gtype == "pos" and val and not pos:
                 pos = val
-            elif gtype == "gender":
-                gender = val
-            elif gtype == "iType":
+            elif gtype == "gender" and val:
+                if val not in genders:
+                    genders.append(val)
+            elif gtype == "iType" and val and not itype:
                 itype = val
+            elif gtype == "case" and val:
+                case_label = val
+
+    # Collapse multi-gender to a slash-joined string (e.g. "m/f/n")
+    gender = "/".join(genders) if genders else ""
 
     # Senses
     senses = [_parse_sense(s) for s in entry_el.findall("tei:sense", NS)]
@@ -338,6 +365,7 @@ def _parse_entry(entry_el, source_file: str) -> dict:
         "pos": pos,
         "gender": gender,
         "itype": itype,
+        "case_label": case_label,
         "senses": senses,
         "source_file": source_file,
     }
@@ -436,13 +464,20 @@ def render_entry(entry: dict) -> None:
 
     badges = ""
     pos_label = POS_MAP.get(entry["pos"], entry["pos"])
-    gender_label = GENDER_MAP.get(entry["gender"], "")
+    # gender may be a single value ("m") or slash-joined ("m/f/n")
+    raw_gender = entry["gender"]
+    gender_parts = raw_gender.split("/") if raw_gender else []
+    gender_label = "/".join(
+        GENDER_MAP.get(g.strip(), g.strip()) for g in gender_parts if g.strip()
+    )
     if pos_label:
         badges += f'<span class="gram-badge">{pos_label}</span>'
     if gender_label:
         badges += f'<span class="gram-badge">{gender_label}</span>'
     if entry["itype"]:
         badges += f'<span class="gram-badge">Conj.&nbsp;{entry["itype"]}</span>'
+    if entry.get("case_label"):
+        badges += f'<span class="gram-badge">{entry["case_label"]}</span>'
 
     senses_html = "".join(_sense_html(s) for s in entry["senses"])
 
@@ -572,14 +607,18 @@ def main() -> None:
         # Build flat dataframe
         rows = []
         for e in all_entries:
+            raw_g = e["gender"]
+            gender_display = "/".join(
+                GENDER_MAP.get(g.strip(), g.strip()) for g in raw_g.split("/") if g.strip()
+            ) if raw_g else ""
             rows.append({
                 "Lemma": e["lemma"],
                 "Part of Speech": POS_MAP.get(e["pos"], e["pos"]) if e["pos"] else "Unknown",
-                "Gender": GENDER_MAP.get(e["gender"], e["gender"]) if e["gender"] else "",
+                "Gender": gender_display,
                 "Conjugation": e["itype"] if e["itype"] else "",
                 "Source File": e["source_file"],
                 "_pos_raw": e["pos"],
-                "_gender_raw": e["gender"],
+                "_gender_raw": raw_g,
             })
         df = pd.DataFrame(rows)
 
